@@ -1,0 +1,428 @@
+---
+title             : "Modeling Indoor/Outdoor Images Using Sentence Embeddings"
+shorttitle        : "Modeling Scene Images"
+author: 
+  - name          : "Anisha Babu"
+    affiliation   : "1"
+    corresponding : yes    
+    email         : "ababu@uoregon.edu"
+    role:         
+      - Data Analysis
+      - Writing
+affiliation:
+  - id            : "1"
+    institution   : "University of Oregon"
+keywords          : "Natural Language Processing, Scene Images, Modeling"
+bibliography      : ["r-references.bib"]
+floatsintext      : no
+figurelist        : no
+tablelist         : no
+footnotelist      : no
+linenumbers       : no
+mask              : no
+draft             : no
+documentclass     : "apa6"
+classoption       : "man"
+output            : papaja::apa6_pdf
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include = FALSE}
+library("papaja")
+r_refs("r-references.bib")
+library(dplyr)
+library(tidyverse)
+require(caret)
+require(recipes)
+require(finalfit)
+require(glmnet)
+require(vip)
+require(cutpointr)
+library(knitr)
+require(rpart)
+require(rattle)
+library(gbm)
+library(kableExtra)
+
+# read csv's
+IM_desc <- read.csv("data/Image Descriptions Reference.csv")
+embed <- read.csv("data/MPNET Reference Vectors.csv")
+```
+
+```{r analysis-preferences}
+# Seed for random number generation
+set.seed(42)
+knitr::opts_chunk$set(cache.extra = knitr::rand_seed)
+```
+
+# Reproducibility: 
+Link to the GitHub repo: https://github.com/anishababu62442/EDLD654-Final
+
+# Research problem: 
+  As we navigate the world, we continuously form memories of similar events. However, similarity between memories can lead to interference (@mensink1988; @oreilly1994). For example, remembering a password for one account is often complicated by interference from memories of other passwords. Although there have been many studies on memory interference, they have primarily focused on the fact that similarity reduces the probability of successfully remembering an event. Meanwhile, an under-explored question is whether similarity changes memories. On the one hand, similarity may lead to integration of similar memories, such that two memories blend together. On the other hand, similarity may lead to repulsion, wherein information that differentiates similar events becomes prioritized in memory (@hulbert2015) or even exaggerated (@chanales2021). For example, let’s say you visited the same restaurant on two different days: a sunny day in August and a breezy day in September. If memory integration occurs, you may blend details of the events (a sunny day in September). If memory repulsion occurs, your memories may prioritize details that differed across the two events (the weather) or even exaggerate differences (a particularly windy day in September). This example illustrates that similarity between events may shape how they are remembered. Critically, these changes, or distortions, in memory content are potentially systematic and, therefore, predictable.
+  
+  Ultimately, I will test for similarity-induced changes in memory content using innovative behavioral methods. Specifically, I will use Natural Language Processing (NLP) techniques to determine whether and how similarity induces changes in memory content. My overarching hypothesis is that similarity between memories will lead to predictable distortions in memory content.
+  
+  In this paper, I will assess preliminary data that will determine the feasibility of using NLP in a full-scale study. NLP is a powerful tool for transforming natural language into numerical vectors that represent semantic information across hundreds of dimensions. Translating memories into these numerical feature spaces will allow me to mathematically express content similarity between individual memories. However, in order to measure how similar memories change, I must first establish a baseline to which written memory can be compared.
+  
+  The stimuli that were used in this preliminary experiment will be used in subsequent memory experiments as well. They consist of a set of naturalistic scene images, with 15 exemplars from 30 categories (e.g., 15 beaches, 15 airports, 15 libraries, etc.). Critically, 15 categories were indoor scenes, and 15 categories were outdoor scenes. In this experiment, participants viewed one image from each category, and wrote a description underneath in at least 15 words. This experiment did not involve a memory task and participants were not exposed to any similar images (i.e., no images from the same category). The purpose of this experiment is to generate baseline vectors using NLP that represent the content of each scene image. Subsequent experiments will compare remembered content to these baseline vectors. See below some sample responses:
+  
+```{r sample responses}
+# display sample written descriptions
+sample <- head(IM_desc, 5)
+sample$Image <- c("Ice-skating rink", "Library", "Indoor pool", "Train station", "Arcade")
+kable(sample, "latex") %>%
+  column_spec(2, width = "25em")
+
+```
+
+  At the end of the experiment, I had a set of five descriptions for each of the 450 images (30 categories x 15 exemplars). Each of these descriptions was transformed into numerical vectors using the NLP algorithm MPNet (@song2020). In this paper, I will assess the specificity of these vectors using machine learning techniques. Specifically, I seek to classify descriptions as corresponding to either an indoor or outdoor image. This analysis will reveal the ability to extrapolate semantic information from MPNet output. Rather than classifying descriptions into specific categories (which are often explicitly written in descriptions), classifying indoor/outdoor images will allow for an interesting assessment of NLP techniques more generally. If successful, this would indicate NLP is a feasible method for quantifying written memory in future experiments. It would be especially interesting to see if a model trained on this baseline data is successful in classifying data from a memory experiment.
+
+# Description of the data:
+  As described before, there were a total of 30 scene image categories, each with 15 images. Critically, half of these categories were outdoor scenes, and half of these categories were indoor scenes.
+  
+  Using separate Python code, written descriptions were transformed into 768-dimension numerical vectors using MPNet. Each description also includes a marker for whether the description corresponds to either an indoor or outdoor image. See first seven columns of sample data:
+
+```{r prep, warning=FALSE}
+# remove first column of numbers
+embeddings <- embed[,-1]
+# get image names from reference descriptions 
+imNames <- IM_desc$Image
+# replace image description column names with image names
+colnames(embeddings) <- imNames
+# transpose so each image is a row
+embeddings <- t(embeddings)
+# make it a data frame
+embeddings <- as.data.frame(embeddings)
+# make image names a column 
+embeddings <- rownames_to_column(embeddings, "Image")
+# separate categories
+embeddings <- embeddings %>%
+  separate(Image, c("Location", "Image"), sep = "[.]") %>%
+  select(-Image) 
+# make factor
+embeddings$Location <- as.factor(embeddings$Location)
+
+# sample data
+sampleData <- embeddings %>%
+  select(Location:V6) %>%
+  head(5)
+kable(sampleData)
+
+```
+
+  See below for count of indoor/outdoor images:
+
+```{r summary data}
+kable(table(embeddings$Location))
+```
+
+# Description of the models: 
+  The first modeling approach I used is logistic regression. I chose this model rather than linear regression because I have a binary outcome (indoor/outdoor), and the model assumptions require a binary outcome. We can also assume the 768 variables outputted from MPNet are independent of one another. To select a model version, I assessed a model without penalty, a model with ridge penalty, and a model with lasso penalty. The cutoff for predictions is: probability > 0.5. For the ridge penalty and lasso penalty versions, multiple lambda values were assessed to find the best fit. The best performing model will be chosen based on measures of: area under the curve, accuracy, and precision. 
+  
+  The second modeling approach I used is a decision tree. NLP output includes hundreds of dimensions representing semantic information. However, it is unlikely that all dimensions are relevant in determining if an image was indoor or outdoor. As such, a decision tree is useful in that it selects the most important variable dimensions, and classifies samples based on values along those important dimensions. The cutoff probability for predictions is: probability > 0.5. To find the best complexity parameter, multiple values were assessed. The model will be assessed based on measures of: area under the curve, accuracy, and precision.  
+  
+  The third modeling approach I used is a bagged tree model. This model randomly selects from the 2250 samples and makes aggregate predictions for multiple different trees. The cutoff probability for predictions is: probability > 0.5. To select the best number of trees, I assessed different numbers from 1-200. The model will be assessed based on measures of: area under the curve, accuracy, and precision.  
+  
+# Model fit: 
+  For the logistic regression model, I tried three different versions: without penalty, with ridge penalty, and with lasso penalty. For ridge penalty, I tested multiple lambda values as seen in the figure below.  
+  
+```{r regular log, warning=FALSE}
+# recode location
+embeddings <- embeddings %>% 
+  mutate(Location=recode(Location, "Indoor" = 0, "Outdoor" = 1))
+# blueprint
+blueprint_embed <- recipe(x  = embeddings,
+                          vars  = colnames(embeddings),
+                          roles = c('outcome',rep('predictor',768))) %>%
+  step_normalize(paste0('V',1:768)) %>%
+  step_num2factor(Location,
+                  transform = function(x) x + 1,
+                  levels=c('Indoor','Outdoor'))
+# create test/train sets
+set.seed(8) 
+whichRows <- sample(1:nrow(embeddings), round(nrow(embeddings) * 0.8))
+embed_train  <- embeddings[whichRows, ]
+embed_test  <- embeddings[-whichRows, ]
+# shuffle data
+set.seed(8)
+embed_train = embed_train[sample(nrow(embed_train)),]
+# create 10 folds
+embed_folds = cut(seq(1,nrow(embed_train)),breaks=10,labels=FALSE)
+# get indices of each fold
+fold_indices <- vector('list', 10)
+for(i in 1:10) {
+  fold_indices[[i]] <- which(embed_folds!=i)
+}
+# cross-validation indices
+crossVal <- trainControl(method = "cv",
+                   index  = fold_indices,
+                   classProbs      = TRUE,
+                   summaryFunction = mnLogLoss)
+# train model
+log_mod <- caret::train(blueprint_embed, 
+                          data      = embed_train, 
+                          method    = "glm",
+                          family    = 'binomial',
+                          metric    = 'logLoss',
+                          trControl = crossVal)
+# predicted outcomes
+predicted_loc <- predict(log_mod, embed_test, type='prob')
+# AUC/TPR/TNR/Precision/ACC
+cut.obj <- cutpointr(x     = predicted_loc$Outdoor,
+                     class = embed_test$Location)
+auc_log <- auc(cut.obj)
+# confusion matrix
+class_log <- ifelse(predicted_loc$Outdoor>.5,1,0)
+confusion <- table(embed_test$Location,class_log)
+TN_log <- confusion[1,1]/(confusion[1,1]+confusion[1,2])
+TP_log <- confusion[2,2]/(confusion[2,1]+confusion[2,2])
+ACC_log <- (confusion[1,1] + confusion[2,2]) / (confusion[1,1]+confusion[1,2]+ confusion[2,1]+confusion[2,2])
+prec_log <- confusion[2,2]/(confusion[1,2]+confusion[2,2])
+LL_log <- log_mod$results$logLoss
+
+```
+
+```{r ridge log}
+# lambda grid
+grid <- data.frame(alpha = 0, lambda = seq(0.001,0.05,.005)) 
+# train model
+log_mod_ridge <- caret::train(blueprint_embed, 
+                                     data      = embed_train, 
+                                     method    = "glmnet",
+                                     family    = 'binomial',
+                                     metric    = 'logLoss',
+                                     trControl = crossVal,
+                                     tuneGrid  = grid)
+
+plot(log_mod_ridge)
+
+```
+
+  For lasso penalty, I tested multiple lambda values as seen in the figure below.  
+
+```{r lasso log}
+# lambda grid
+grid <- data.frame(alpha = 1, lambda = seq(0.001,.01,.001)) 
+# train model
+log_mod_lasso <- caret::train(blueprint_embed, 
+                                     data      = embed_train, 
+                                     method    = "glmnet",
+                                     family    = 'binomial',
+                                     metric    = 'logLoss',
+                                     trControl = crossVal,
+                                     tuneGrid  = grid)
+
+plot(log_mod_lasso)
+
+```
+
+```{r summarize log}
+# Evaluate the performance of the models in 1.2/1.3/.4 on  test  
+predicted_loc_ridge <- predict(log_mod_ridge, embed_test, type='prob')
+predicted_loc_lasso <- predict(log_mod_lasso, embed_test, type='prob')
+
+# AUC/TPR/TNR/Precision/ACC
+cut.obj <- cutpointr(x     = predicted_loc_ridge$Outdoor,
+                     class = embed_test$Location)
+auc_log_ridge <- auc(cut.obj)
+# confusion matrix
+class_log_ridge <- ifelse(predicted_loc_ridge$Outdoor>.5,1,0)
+confusion <- table(embed_test$Location,class_log_ridge)
+TN_log_ridge <- confusion[1,1]/(confusion[1,1]+confusion[1,2])
+TP_log_ridge <- confusion[2,2]/(confusion[2,1]+confusion[2,2])
+ACC_log_ridge <- (confusion[1,1] + confusion[2,2]) / (confusion[1,1]+confusion[1,2]+ confusion[2,1]+confusion[2,2])
+prec_log_ridge <- confusion[2,2]/(confusion[1,2]+confusion[2,2])
+LL_log_ridge <- log_mod_ridge$results$logLoss[log_mod_ridge$results$lambda == log_mod_ridge$bestTune$lambda]
+
+# AUC/TPR/TNR/Precision/ACC
+cut.obj <- cutpointr(x     = predicted_loc_lasso$Outdoor,
+                     class = embed_test$Location)
+auc_log_lasso <- auc(cut.obj)
+# confusion matrix
+class_log_lasso <- ifelse(predicted_loc_lasso$Outdoor>.5,1,0)
+confusion <- table(embed_test$Location,class_log_lasso)
+TN_log_lasso <- confusion[1,1]/(confusion[1,1]+confusion[1,2])
+TP_log_lasso <- confusion[2,2]/(confusion[2,1]+confusion[2,2])
+ACC_log_lasso <- (confusion[1,1] + confusion[2,2]) / (confusion[1,1]+confusion[1,2]+ confusion[2,1]+confusion[2,2])
+prec_log_lasso <- confusion[2,2]/(confusion[1,2]+confusion[2,2])
+LL_log_lasso <- log_mod_lasso$results$logLoss[log_mod_lasso$results$lambda == log_mod_lasso$bestTune$lambda]
+
+```
+
+  I assessed performance for each version by calculating area under the curve, accuracy, and precision (summarized in table below). Based on these results, I would choose logistic regression with ridge penalty, as it had the highest accuracy and precision, and close to the highest area under the curve. Strikingly, all models have very high performance overall.
+
+```{r log table}
+# Summarize  numbers in a table 
+row_names <- c("Log Reg", "Log Reg with Ridge", "Log Reg with Lasso ")
+log_vals <- c(LL_log, auc_log, ACC_log, TP_log, TN_log, prec_log)
+log_ridge_vals <- c(LL_log_ridge, auc_log_ridge, ACC_log_ridge, TP_log_ridge, TN_log_ridge, prec_log_ridge)
+log_lasso_vals <- c(LL_log_lasso, auc_log_lasso, ACC_log_lasso, TP_log_lasso, TN_log_lasso, prec_log_lasso)
+table_df <- rbind(log_vals, log_ridge_vals, log_lasso_vals)
+row.names(table_df) <- row_names
+colnames(table_df) <- c("LL", "AUC", "ACC", "TPR", "TNR", "PRE")
+kable(table_df)
+
+```
+
+  For the decision tree model, I tested multiple complexity parameter values as seen in the figure below. 
+
+```{r decision prep}
+# train/test split
+# create test/train sets
+set.seed(8) 
+whichRows <- sample(1:nrow(embeddings), round(nrow(embeddings) * 0.8))
+embed_train  <- embeddings[whichRows, ]
+embed_test  <- embeddings[-whichRows, ]
+# shuffle data
+set.seed(8) 
+embed_train = embed_train[sample(nrow(embed_train)),]
+# create 10 folds 
+folds = cut(seq(1,nrow(embed_train)),breaks=10,labels=FALSE)
+# create  list for each fold 
+my.indices <- vector('list',10)
+for(i in 1:10) {
+  my.indices[[i]] <- which(folds!=i)
+}
+# cross-validation 
+cv <- trainControl(method = "cv",
+                     index  = my.indices,
+                     classProbs = TRUE,
+                     summaryFunction = mnLogLoss)
+
+
+```
+
+```{r descision model}
+# grid
+grid <- data.frame(cp=seq(0,0.02,.001))
+# train model
+decision_tree <- caret::train(blueprint_embed,
+                             data      = embed_train,
+                             method    = 'rpart',
+                             tuneGrid  = grid,
+                             trControl = cv,
+                             metric    = 'logLoss',
+                             control   = list(minsplit=20,
+                                             minbucket = 2,
+                                             maxdepth = 60))
+# plot cp values
+plot(decision_tree)
+
+```
+
+See figure below for diagram of decision tree. I also assessed performance for the decision tree model by calculating area under the curve, accuracy, and precision (summarized in table at the end). 
+
+```{r show tree}
+# plot decision tree
+fancyRpartPlot(decision_tree$finalModel,type=2,sub='')
+# predict location
+predicted_loc <- predict(decision_tree, embed_test, type='prob')
+
+```
+
+```{r evaluate decision}
+# AUC/TPR/TNR/Precision/ACC
+cut.obj <- cutpointr(x     = predicted_loc$Outdoor,
+                     class = embed_test$Location)
+auc_dec <- auc(cut.obj)
+# confusion matrix
+class_dec <- ifelse(predicted_loc$Outdoor>.5,1,0)
+confusion <- table(embed_test$Location,class_dec)
+TN_dec <- confusion[1,1]/(confusion[1,1]+confusion[1,2])
+TP_dec <- confusion[2,2]/(confusion[2,1]+confusion[2,2])
+ACC_dec <- (confusion[1,1] + confusion[2,2]) / (confusion[1,1]+confusion[1,2]+ confusion[2,1]+confusion[2,2])
+prec_dec <- confusion[2,2]/(confusion[1,2]+confusion[2,2])
+LL_dec <- decision_tree$results$logLoss[decision_tree$results$cp == decision_tree$bestTune$cp]
+
+```
+
+  For the bagged tree model, I tested multiple number of tree values (1-200). Due to high computational time, the figure below shows only a few sample values. I also assessed performance for the bagged tree model by calculating area under the curve, accuracy, and precision (summarized in table at the end). 
+
+```{r bagged}
+# grid
+grid <- expand.grid(mtry = 768,
+                    splitrule='gini',
+                    min.node.size=2)
+# 1:200 num trees
+numTrees <- c(1, 2, 3, 4, 50, 110, 111, 112, 200)
+bagged <- vector('list',9)
+for(i in 1:9) {
+  curTrees <- numTrees[i]
+  bagged[[i]] <- caret::train(blueprint_embed,
+                                data      = embed_train,
+                                method    = 'ranger',
+                                trControl = cv,
+                                tuneGrid  = grid,
+                                metric    = 'logLoss',
+                                num.trees = curTrees,
+                                max.depth = 60)
+}
+
+```
+
+```{r best bagged}
+# plot best num trees
+logLossVal <- c()
+for(i in 1:9) {
+  logLossVal[i] = bagged[[i]]$results$logLoss
+}
+ggplot() +
+  geom_line(aes(x=numTrees,y=logLossVal))+
+  xlab('Number of Tree Models')+
+  ylab('Negative LogLoss')+
+  ylim(c(0,12))+
+  theme_bw()
+# best num trees (which.min(logLossVal)) -> was 111
+
+```
+
+```{r assess bagged}
+predicted_loc <- predict(bagged[[7]], embed_test, type='prob')
+
+# AUC/TPR/TNR/Precision/ACC
+cut.obj <- cutpointr(x     = predicted_loc$Outdoor,
+                     class = embed_test$Location)
+auc_bag <- auc(cut.obj) # 0.9987356
+# confusion matrix
+class_bag <- ifelse(predicted_loc$Outdoor>.5,1,0)
+confusion <- table(embed_test$Location,class_bag)
+TN_bag <- confusion[1,1]/(confusion[1,1]+confusion[1,2]) # 0.9780702
+TP_bag <- confusion[2,2]/(confusion[2,1]+confusion[2,2]) # 0.9954955
+ACC_bag <- (confusion[1,1] + confusion[2,2]) / (confusion[1,1]+confusion[1,2]+ confusion[2,1]+confusion[2,2]) # 0.9866667
+prec_bag <- confusion[2,2]/(confusion[1,2]+confusion[2,2]) # 0.9778761
+LL_bag <- bagged[[7]]$results$logLoss # 0.1131533
+
+```
+
+  The table below shows results for all three models considered based on measures of area under the curve, accuracy, and precision. From these measures, logistic regression with ridge regression performs the best, followed by the bagged tree model, then the decision tree model. 
+
+```{r compare all}
+row_names <- c("Log Reg with Ridge", "Decision Tree", "Bagged Tree")
+log_ridge_vals <- c(LL_log_ridge, auc_log_ridge, ACC_log_ridge, TP_log_ridge, TN_log_ridge, prec_log_ridge)
+dec_vals <- c(LL_dec, auc_dec, ACC_dec, TP_dec, TN_dec, prec_dec)
+bag_vals <- c(LL_bag, auc_bag, ACC_bag, TP_bag, TN_bag, prec_bag)
+table_df <- rbind(log_ridge_vals, dec_vals, bag_vals)
+row.names(table_df) <- row_names
+colnames(table_df) <- c("LL", "AUC", "ACC", "TPR", "TNR", "PRE")
+kable(table_df)
+
+```
+
+# Discussion/Conclusion: 
+  It was interesting to find that, despite using more complex models like decision trees and bagged trees, logistic regression still had the best performance. Since the variables used were NLP output, we do not actually know what information specific variables represent. As such, the variables used in the decision tree are interesting in that they show which of the 768 NLP output values may represent indoor/outdoor information.
+  The decision tree performed noticeably poorer compared to the logistic regression and bagged tree models. This may be because decision tree models are better suited to categorical values, and when used here had to be limited whether the variable is greater than or less than some value.
+  These findings are useful in showing that overall, there was quite high accuracy in decoding whether images were indoor or outdoor. This suggests the written image descriptions are descriptive enough that they may prove useful in a future memory experiment.
+
+\newpage
+
+# References
+
+\begingroup
+\setlength{\parindent}{-0.5in}
+\setlength{\leftskip}{0.5in}
+
+<div id="refs" custom-style="Bibliography"></div>
+\endgroup
+
